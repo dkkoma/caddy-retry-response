@@ -197,6 +197,7 @@ type bufferedBody struct {
 	replayable bool
 	mem        []byte
 	file       *os.File
+	fileName   string
 	size       int64
 }
 
@@ -210,9 +211,12 @@ func (b *bufferedBody) newReader() io.ReadCloser {
 
 func (b *bufferedBody) cleanup() {
 	if b.file != nil {
-		// The file was unlinked right after creation, so closing reliably removes it
 		_ = b.file.Close()
 		b.file = nil
+	}
+	if b.fileName != "" {
+		_ = os.Remove(b.fileName)
+		b.fileName = ""
 	}
 }
 
@@ -249,7 +253,10 @@ func (h *Handler) bufferRequestBody(r *http.Request) (*bufferedBody, error) {
 		return nil, caddyhttp.Error(http.StatusInternalServerError, err)
 	}
 	// Unlink immediately so the temp file never lingers even on abnormal exit
-	_ = os.Remove(f.Name())
+	b.fileName = f.Name()
+	if err := os.Remove(b.fileName); err == nil {
+		b.fileName = ""
+	}
 	b.file = f
 
 	if _, err := f.Write(buf.Bytes()); err != nil {
