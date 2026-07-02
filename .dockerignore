@@ -1,0 +1,4 @@
+.git
+buildenv_*
+*.test
+coverage.out

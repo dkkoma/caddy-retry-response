@@ -167,6 +167,25 @@ example.com {
 go test ./...
 ```
 
+The default test suite includes unit tests, Caddyfile adapter/order coverage, and
+an in-process Caddy HTTP integration test using `reverse_proxy`. These are safe
+to run in CI and do not require FrankenPHP.
+
+An optional FrankenPHP smoke test is available for manual verification. Build a
+FrankenPHP binary that includes this module, then run:
+
+```sh
+FRANKENPHP_BIN=/path/to/frankenphp go test -tags=e2e ./...
+```
+
+There is also a Docker-based FrankenPHP E2E check which builds a FrankenPHP
+image with this module, serves a tiny PHP app through `php_server`, and verifies
+that a first-attempt 429 is retried without leaking its response:
+
+```sh
+./e2e/frankenphp/run.sh
+```
+
 ## License
 
 [MIT](LICENSE)
