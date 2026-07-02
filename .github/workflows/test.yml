@@ -36,6 +36,9 @@ jobs:
       - name: go test
         run: go test ./... -v
 
+      - name: go test -race
+        run: go test -race ./... -v
+
   frankenphp-e2e:
     runs-on: ubuntu-latest
     steps:
