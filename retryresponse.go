@@ -239,7 +239,7 @@ func (h *Handler) bufferRequestBody(r *http.Request) (*bufferedBody, error) {
 	n, err := io.Copy(&buf, io.LimitReader(r.Body, h.MemoryBuffer+1))
 	if err != nil {
 		// failed to read the body from the client
-		return nil, caddyhttp.Error(http.StatusBadRequest, err)
+		return nil, requestBodyReadError(r, err)
 	}
 	if n <= h.MemoryBuffer {
 		b.mem = buf.Bytes()
@@ -266,7 +266,7 @@ func (h *Handler) bufferRequestBody(r *http.Request) (*bufferedBody, error) {
 	rest, err := io.Copy(f, io.LimitReader(r.Body, h.MaxBody-n+1))
 	if err != nil {
 		b.cleanup()
-		return nil, caddyhttp.Error(http.StatusBadRequest, err)
+		return nil, requestBodyReadError(r, err)
 	}
 	b.size = n + rest
 
@@ -280,6 +280,13 @@ func (h *Handler) bufferRequestBody(r *http.Request) (*bufferedBody, error) {
 		}
 	}
 	return b, nil
+}
+
+func requestBodyReadError(r *http.Request, err error) error {
+	if ctxErr := r.Context().Err(); ctxErr != nil {
+		return caddyhttp.Error(statusClientClosedRequest, ctxErr)
+	}
+	return caddyhttp.Error(http.StatusBadRequest, err)
 }
 
 // passthroughBody is a one-shot reader stitching the buffered part to the unread body

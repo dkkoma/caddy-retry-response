@@ -34,6 +34,17 @@ func newHandler(t *testing.T, mutate func(*Handler)) *Handler {
 	return h
 }
 
+type cancelingReadCloser struct {
+	cancel context.CancelFunc
+}
+
+func (c *cancelingReadCloser) Read([]byte) (int, error) {
+	c.cancel()
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (c *cancelingReadCloser) Close() error { return nil }
+
 // First attempt returns 429, second returns 200 with the body intact
 func TestRetryThenSuccess(t *testing.T) {
 	h := newHandler(t, func(h *Handler) { h.Attempts = 10 })
@@ -301,6 +312,32 @@ func TestClientDisconnectStopsRetry(t *testing.T) {
 	err := h.ServeHTTP(rec, req, next)
 	if calls != 1 {
 		t.Errorf("next called %d times, want 1", calls)
+	}
+	var handlerErr caddyhttp.HandlerError
+	if !errors.As(err, &handlerErr) || handlerErr.StatusCode != statusClientClosedRequest {
+		t.Errorf("err = %v, want HandlerError 499", err)
+	}
+}
+
+// A disconnect while reading the request body is logged like nginx's 499, not
+// treated as a malformed request body
+func TestClientDisconnectDuringBodyReadReturns499(t *testing.T) {
+	h := newHandler(t, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/", nil).WithContext(ctx)
+	req.Body = &cancelingReadCloser{cancel: cancel}
+	req.ContentLength = -1
+
+	calls := 0
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		calls++
+		return nil
+	})
+
+	err := h.ServeHTTP(httptest.NewRecorder(), req, next)
+	if calls != 0 {
+		t.Errorf("next called %d times, want 0", calls)
 	}
 	var handlerErr caddyhttp.HandlerError
 	if !errors.As(err, &handlerErr) || handlerErr.StatusCode != statusClientClosedRequest {
