@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,28 +82,28 @@ func TestCaddyRuntimeRetriesReverseProxyResponse(t *testing.T) {
 	payloadHashBytes := sha256.Sum256([]byte(payload))
 	payloadHash := hex.EncodeToString(payloadHashBytes[:])
 
-	var calls int
+	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls++
+		attempt := calls.Add(1)
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			t.Errorf("attempt %d: read body: %v", calls, err)
+			t.Errorf("attempt %d: read body: %v", attempt, err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if string(body) != payload {
-			t.Errorf("attempt %d: body mismatch: got %d bytes", calls, len(body))
+			t.Errorf("attempt %d: body mismatch: got %d bytes", attempt, len(body))
 			http.Error(w, "body mismatch", http.StatusInternalServerError)
 			return
 		}
 		if got := r.Header.Get("Content-Length"); got != fmt.Sprint(len(payload)) {
-			t.Errorf("attempt %d: Content-Length = %q, want %d", calls, got, len(payload))
+			t.Errorf("attempt %d: Content-Length = %q, want %d", attempt, got, len(payload))
 		}
 
-		w.Header().Set("X-From-Attempt", fmt.Sprint(calls))
+		w.Header().Set("X-From-Attempt", fmt.Sprint(attempt))
 		w.Header().Set("X-Body-SHA256", payloadHash)
-		if calls == 1 {
+		if attempt == 1 {
 			w.Header().Set("Set-Cookie", "leak=1")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte("discarded"))
@@ -148,8 +149,8 @@ http://localhost:%d {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 
-	if calls != 2 {
-		t.Fatalf("upstream calls = %d, want 2", calls)
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%q", resp.StatusCode, body)
