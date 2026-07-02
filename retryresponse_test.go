@@ -45,6 +45,32 @@ func (c *cancelingReadCloser) Read([]byte) (int, error) {
 
 func (c *cancelingReadCloser) Close() error { return nil }
 
+type multiHeaderRecorder struct {
+	header http.Header
+	codes  []int
+	body   bytes.Buffer
+}
+
+func newMultiHeaderRecorder() *multiHeaderRecorder {
+	return &multiHeaderRecorder{header: make(http.Header)}
+}
+
+func (m *multiHeaderRecorder) Header() http.Header { return m.header }
+
+func (m *multiHeaderRecorder) WriteHeader(code int) {
+	m.codes = append(m.codes, code)
+}
+
+func (m *multiHeaderRecorder) Write(p []byte) (int, error) {
+	for _, code := range m.codes {
+		if code >= 200 {
+			return m.body.Write(p)
+		}
+	}
+	m.WriteHeader(http.StatusOK)
+	return m.body.Write(p)
+}
+
 // First attempt returns 429, second returns 200 with the body intact
 func TestRetryThenSuccess(t *testing.T) {
 	h := newHandler(t, func(h *Handler) { h.Attempts = 10 })
@@ -156,6 +182,38 @@ func TestNonRetryStatusPassthrough(t *testing.T) {
 	}
 	if rec.Code != http.StatusInternalServerError || rec.Body.String() != "boom" {
 		t.Errorf("response not passed through: %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInformationalResponseBeforeRetry(t *testing.T) {
+	h := newHandler(t, func(h *Handler) { h.Attempts = 3 })
+
+	calls := 0
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusEarlyHints)
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte("discarded"))
+			return nil
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+		return nil
+	})
+
+	rec := newMultiHeaderRecorder()
+	if err := h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil), next); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("next called %d times, want 2", calls)
+	}
+	if len(rec.codes) != 2 || rec.codes[0] != http.StatusEarlyHints || rec.codes[1] != http.StatusOK {
+		t.Fatalf("codes = %v, want [103 200]", rec.codes)
+	}
+	if rec.body.String() != "ok" {
+		t.Fatalf("body = %q, want ok", rec.body.String())
 	}
 }
 
