@@ -45,6 +45,14 @@ func (c *cancelingReadCloser) Read([]byte) (int, error) {
 
 func (c *cancelingReadCloser) Close() error { return nil }
 
+type errorReadCloser struct {
+	err error
+}
+
+func (e *errorReadCloser) Read([]byte) (int, error) { return 0, e.err }
+
+func (e *errorReadCloser) Close() error { return nil }
+
 type multiHeaderRecorder struct {
 	header http.Header
 	codes  []int
@@ -422,6 +430,31 @@ func TestClientDisconnectDuringBodyReadReturns499(t *testing.T) {
 	var handlerErr caddyhttp.HandlerError
 	if !errors.As(err, &handlerErr) || handlerErr.StatusCode != statusClientClosedRequest {
 		t.Errorf("err = %v, want HandlerError 499", err)
+	}
+}
+
+func TestRequestBodyHandlerErrorPreserved(t *testing.T) {
+	h := newHandler(t, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Body = &errorReadCloser{
+		err: caddyhttp.Error(http.StatusRequestEntityTooLarge, errors.New("request body too large")),
+	}
+	req.ContentLength = -1
+
+	calls := 0
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		calls++
+		return nil
+	})
+
+	err := h.ServeHTTP(httptest.NewRecorder(), req, next)
+	if calls != 0 {
+		t.Errorf("next called %d times, want 0", calls)
+	}
+	handlerErr, ok := err.(caddyhttp.HandlerError)
+	if !ok || handlerErr.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("err = %v, want HandlerError 413", err)
 	}
 }
 
