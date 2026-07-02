@@ -394,9 +394,15 @@ func (a *attemptWriter) WriteHeader(code int) {
 		return
 	}
 	if code >= 100 && code <= 199 {
-		// informational responses are not final statuses; forward them as-is
+		// 1xx は最終ステータスではないため転送する。1xx はその時点のヘッダ付きで
+		// 即時送信するしかないので、実 writer のヘッダマップを一時的にこの試行の
+		// 内容へ差し替えて送信し、送信後に元へ戻す。戻さずに残すと、この試行が
+		// 破棄されたとき次の試行のスナップショット (newAttemptWriter) にヘッダが
+		// 混入し、最終レスポンスへ漏れる
+		saved := a.rw.Header().Clone()
 		a.syncHeader()
 		a.rw.WriteHeader(code)
+		replaceHeader(a.rw.Header(), saved)
 		return
 	}
 	a.wroteHeader = true
@@ -412,13 +418,17 @@ func (a *attemptWriter) WriteHeader(code int) {
 
 // syncHeader replaces the real ResponseWriter's header map with this attempt's headers
 func (a *attemptWriter) syncHeader() {
-	dst := a.rw.Header()
-	for k := range dst {
-		if _, ok := a.header[k]; !ok {
-			delete(dst, k)
-		}
-	}
-	maps.Copy(dst, a.header)
+	replaceHeader(a.rw.Header(), a.header)
+}
+
+// replaceHeader は dst の中身を src と過不足なく一致させる。dst には呼び出し元の
+// ResponseWriter がプリセットしたヘッダ (Server 等) が入っており、試行がそれを
+// 削除した場合はその削除も反映する必要があるため、単なる上書きではなく空にして
+// から詰め直す。dst のマップは ResponseWriter が参照を保持しているので作り直さず
+// in-place で入れ替える。dst と src は常に別インスタンスである前提
+func replaceHeader(dst, src http.Header) {
+	clear(dst)
+	maps.Copy(dst, src)
 }
 
 // Write implements http.ResponseWriter.

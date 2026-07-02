@@ -488,6 +488,73 @@ func TestPresetHeaderVisibleAndRemovable(t *testing.T) {
 	}
 }
 
+// informationalRecorder は実サーバと同様に 1xx を最終ステータスとして扱わず、
+// 送信時点のヘッダとともに記録するレコーダー
+type informationalRecorder struct {
+	*httptest.ResponseRecorder
+	informational []informationalResponse
+}
+
+type informationalResponse struct {
+	code   int
+	header http.Header
+}
+
+func (r *informationalRecorder) WriteHeader(code int) {
+	if code >= 100 && code <= 199 {
+		r.informational = append(r.informational, informationalResponse{code: code, header: r.Header().Clone()})
+		return
+	}
+	r.ResponseRecorder.WriteHeader(code)
+}
+
+// 破棄される試行が送った Early Hints (103) はその時点のヘッダ付きで転送しつつ、
+// そのヘッダが後続試行のスナップショットへ混入して最終レスポンスに漏れないこと
+func TestEarlyHintsForwardedWithoutLeakingHeaders(t *testing.T) {
+	h := newHandler(t, func(h *Handler) { h.Attempts = 5 })
+
+	calls := 0
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Link", "</style.css>; rel=preload")
+			w.Header().Set("Set-Cookie", "leak=1")
+			w.WriteHeader(http.StatusEarlyHints)
+			w.WriteHeader(http.StatusTooManyRequests)
+			return nil
+		}
+		w.WriteHeader(http.StatusOK)
+		return nil
+	})
+
+	rec := &informationalRecorder{ResponseRecorder: httptest.NewRecorder()}
+	if err := h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/", strings.NewReader("x")), next); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("next called %d times, want 2", calls)
+	}
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+
+	// 103 は試行のヘッダ (Link) 付きで転送される
+	if len(rec.informational) != 1 || rec.informational[0].code != http.StatusEarlyHints {
+		t.Fatalf("informational = %+v, want single 103", rec.informational)
+	}
+	if got := rec.informational[0].header.Get("Link"); got != "</style.css>; rel=preload" {
+		t.Errorf("103 Link = %q, want preload hint", got)
+	}
+
+	// 破棄された試行のヘッダは最終レスポンスに残ってはいけない
+	if got := rec.Header().Get("Set-Cookie"); got != "" {
+		t.Errorf("Set-Cookie leaked from discarded attempt: %q", got)
+	}
+	if got := rec.Header().Get("Link"); got != "" {
+		t.Errorf("Link leaked from discarded attempt: %q", got)
+	}
+}
+
 // A bodyless GET can be retried, and no Content-Length is added
 func TestGetWithoutBody(t *testing.T) {
 	h := newHandler(t, nil)

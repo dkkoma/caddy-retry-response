@@ -33,6 +33,11 @@ configurable number of attempts. The client only ever sees the final response.
 - Headers and body from discarded attempts never leak into the response the
   client receives. Each attempt gets a cloned header map, so mutations
   (including deleting server-preset headers like `Server: Caddy`) stay isolated.
+- Informational responses (1xx, e.g. 103 Early Hints) are forwarded to the
+  client immediately, carrying the headers the attempt has set at that point.
+  A 1xx cannot be recalled once sent, so hints from an attempt that is later
+  discarded do reach the client (they are speculative by design) — but the
+  headers they carried never leak into the final response.
 - Responses with a non-retryable status stream straight through, including
   `Flush`-based streaming.
 - Hijacked connections (WebSockets etc.) are passed through and never retried.
