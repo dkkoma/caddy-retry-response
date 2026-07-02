@@ -80,8 +80,8 @@ All subdirectives are optional.
 |---|---|---|
 | `statuses <code...>` | `429` | HTTP response statuses that trigger a retry. Must be 200–599 (1xx can never be a final status). |
 | `attempts <n>` | `10` | Total number of tries, **including the first one**. `attempts 1` disables retrying. |
-| `memory_buffer <size>` | `50MiB` | Request body size kept in memory. Anything beyond spills to a temp file. Accepts human-readable sizes (`50MiB`, `1GB`, ...). |
-| `max_body <size>` | `1GiB` | Largest request body to buffer. Larger bodies run exactly once, without retry. |
+| `memory_buffer <size>` | `50MiB` | Request body size kept in memory. Anything beyond spills to a temp file. Accepts human-readable sizes (`50MiB`, `1GB`, ...). A zero value means "use the default", following Caddy's usual zero-value convention; it cannot be used to force every body directly to disk. |
+| `max_body <size>` | `1GiB` | Largest request body to buffer. Larger bodies run exactly once, without retry. The default is intentionally broad; set this explicitly for production sites. |
 | `temp_dir <path>` | OS temp dir | Directory for spill files. Created with mode 0700 if missing. |
 
 ### JSON config
@@ -137,9 +137,10 @@ example.com {
 ## Operational notes
 
 - Keep `max_body` aligned with the site's `request_body max_size`. The module
-  buffers **outside** the site's request-body limit, so setting `max_body` larger
-  than the site limit just pays buffering cost for requests that will be rejected
-  anyway.
+  runs before the site's request-body limit and buffers **outside** that limit,
+  so the default `1GiB` can allow large requests to be written to disk before
+  `request_body` rejects them. Set `max_body` explicitly instead of relying on
+  the default for production sites.
 - Only the final attempt's status appears in Caddy's access log (same as nginx).
   Intermediate attempts are visible in the module's debug log
   (`retrying request` with `uri`, `attempt`, and `status` fields).
@@ -157,6 +158,14 @@ example.com {
   streams through; a retryable status arriving *after* streaming started cannot
   be (and is not) retried.
 - **Hijacked connections** (WebSockets etc.): passed through untouched.
+- **Trailers on pass-through attempts**: HTTP trailers set after `WriteHeader`
+  on a non-final pass-through attempt are not preserved. This module is designed
+  for conventional request/response handlers such as `php_server`, not gRPC
+  trailer semantics.
+- **ResponseController deadlines**: the wrapper intentionally does not implement
+  `Unwrap`, so `http.ResponseController` operations other than the explicitly
+  supported `Flush` and `Hijack` may return `ErrNotSupported` on non-final
+  attempts.
 - **Waiting/backoff between attempts**: intentionally not implemented; see
   Behavior above.
 - **`Retry-After` interpretation**: the response is discarded without reading it.
