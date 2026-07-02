@@ -338,7 +338,9 @@ type passthroughBody struct {
 func (p *passthroughBody) Close() error { return p.closer.Close() }
 
 // replayRequest builds a per-attempt request carrying the buffered body.
-// Headers are cloned so downstream mutations don't bleed across attempts
+// Headers are cloned so downstream mutations don't bleed across attempts.
+// Caddy vars live in the request context, so context-scoped mutations are
+// intentionally shared across attempts.
 func replayRequest(r *http.Request, body *bufferedBody) *http.Request {
 	req := r.Clone(r.Context())
 	req.Body = body.newReader()
