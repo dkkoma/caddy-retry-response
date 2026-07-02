@@ -17,7 +17,6 @@ package retryresponse
 import (
 	"bufio"
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -324,10 +323,6 @@ func growBufferForContentLength(buf *bytes.Buffer, contentLength int64) {
 }
 
 func requestBodyReadError(r *http.Request, err error) error {
-	var handlerErr caddyhttp.HandlerError
-	if errors.As(err, &handlerErr) && handlerErr.StatusCode != 0 {
-		return caddyhttp.Error(handlerErr.StatusCode, err)
-	}
 	if ctxErr := r.Context().Err(); ctxErr != nil {
 		return caddyhttp.Error(statusClientClosedRequest, ctxErr)
 	}
