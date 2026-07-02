@@ -4,7 +4,7 @@ FROM dunglas/frankenphp:builder AS builder
 
 COPY --from=caddy:builder /usr/bin/xcaddy /usr/bin/xcaddy
 RUN mkdir -p /src/caddy-retry-response
-COPY go.mod go.sum retryresponse.go /src/caddy-retry-response/
+COPY . /src/caddy-retry-response/
 WORKDIR /go/src/app
 
 RUN --mount=type=cache,target=/go/pkg/mod \
