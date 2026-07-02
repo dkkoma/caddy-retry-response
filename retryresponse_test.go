@@ -229,6 +229,28 @@ func TestBufferRequestBodySpill(t *testing.T) {
 	}
 }
 
+func TestBufferRequestBodyMemoryBufferBoundary(t *testing.T) {
+	h := newHandler(t, func(h *Handler) {
+		h.MemoryBuffer = 4
+		h.TempDir = t.TempDir()
+	})
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("0123"))
+	b, err := h.bufferRequestBody(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.cleanup()
+	if b.file != nil {
+		t.Fatalf("expected in-memory body, got file=%v", b.file)
+	}
+	if string(b.mem) != "0123" {
+		t.Fatalf("mem = %q, want 0123", b.mem)
+	}
+	if b.size != 4 {
+		t.Fatalf("size = %d, want 4", b.size)
+	}
+}
+
 // A Content-Length over max_body means no buffering and no retry
 func TestMaxBodyExceededByContentLength(t *testing.T) {
 	h := newHandler(t, func(h *Handler) { h.MaxBody = 8 })

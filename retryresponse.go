@@ -235,7 +235,25 @@ func (h *Handler) bufferRequestBody(r *http.Request) (*bufferedBody, error) {
 		return b, nil
 	}
 
+	if r.ContentLength > h.MemoryBuffer {
+		f, err := h.createSpillFile(b)
+		if err != nil {
+			return nil, err
+		}
+		n, err := io.Copy(f, io.LimitReader(r.Body, h.MaxBody+1))
+		if err != nil {
+			b.cleanup()
+			return nil, requestBodyReadError(r, err)
+		}
+		b.size = n
+		if b.size > h.MaxBody {
+			markBodyPassthrough(r, b)
+		}
+		return b, nil
+	}
+
 	var buf bytes.Buffer
+	growBufferForContentLength(&buf, r.ContentLength)
 	n, err := io.Copy(&buf, io.LimitReader(r.Body, h.MemoryBuffer+1))
 	if err != nil {
 		// failed to read the body from the client
@@ -248,17 +266,10 @@ func (h *Handler) bufferRequestBody(r *http.Request) (*bufferedBody, error) {
 	}
 
 	// Spill anything beyond memory_buffer to a temp file
-	f, err := os.CreateTemp(h.TempDir, "retry-response-*")
+	f, err := h.createSpillFile(b)
 	if err != nil {
-		return nil, caddyhttp.Error(http.StatusInternalServerError, err)
+		return nil, err
 	}
-	// Unlink immediately so the temp file never lingers even on abnormal exit
-	b.fileName = f.Name()
-	if err := os.Remove(b.fileName); err == nil {
-		b.fileName = ""
-	}
-	b.file = f
-
 	if _, err := f.Write(buf.Bytes()); err != nil {
 		b.cleanup()
 		return nil, caddyhttp.Error(http.StatusInternalServerError, err)
@@ -273,13 +284,42 @@ func (h *Handler) bufferRequestBody(r *http.Request) (*bufferedBody, error) {
 	if b.size > h.MaxBody {
 		// Over the limit. Stitch the read part to the unread rest and fall back
 		// to a single execution
-		b.replayable = false
-		r.Body = &passthroughBody{
-			Reader: io.MultiReader(io.NewSectionReader(b.file, 0, b.size), r.Body),
-			closer: r.Body,
-		}
+		markBodyPassthrough(r, b)
 	}
 	return b, nil
+}
+
+func markBodyPassthrough(r *http.Request, b *bufferedBody) {
+	b.replayable = false
+	r.Body = &passthroughBody{
+		Reader: io.MultiReader(io.NewSectionReader(b.file, 0, b.size), r.Body),
+		closer: r.Body,
+	}
+}
+
+func (h *Handler) createSpillFile(b *bufferedBody) (*os.File, error) {
+	f, err := os.CreateTemp(h.TempDir, "retry-response-*")
+	if err != nil {
+		return nil, caddyhttp.Error(http.StatusInternalServerError, err)
+	}
+	// Unlink immediately on platforms that allow it. If that fails, remember
+	// the name so cleanup can remove it after close.
+	b.fileName = f.Name()
+	if err := os.Remove(b.fileName); err == nil {
+		b.fileName = ""
+	}
+	b.file = f
+	return f, nil
+}
+
+func growBufferForContentLength(buf *bytes.Buffer, contentLength int64) {
+	if contentLength <= 0 {
+		return
+	}
+	if int64(int(contentLength)) != contentLength {
+		return
+	}
+	buf.Grow(int(contentLength))
 }
 
 func requestBodyReadError(r *http.Request, err error) error {
