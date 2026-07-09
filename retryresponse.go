@@ -17,6 +17,7 @@ package retryresponse
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
@@ -24,12 +25,14 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/caddyconfig/httpcaddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"github.com/dustin/go-humanize"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -85,7 +88,13 @@ type Handler struct {
 	// 非公開フィールドは JSON マーシャル対象外なので、設定としては露出しない
 	statusSet map[int]struct{}
 	logger    *zap.Logger
+	retries   *prometheus.CounterVec
 }
+
+var retryResponseMetrics = struct {
+	once    sync.Once
+	retries *prometheus.CounterVec
+}{}
 
 // CaddyModule implements caddy.Module.
 func (*Handler) CaddyModule() caddy.ModuleInfo {
@@ -97,7 +106,7 @@ func (*Handler) CaddyModule() caddy.ModuleInfo {
 
 // Provision implements caddy.Provisioner.
 func (h *Handler) Provision(ctx caddy.Context) error {
-	return h.provision(ctx.Logger())
+	return h.provision(ctx.Logger(), ctx.GetMetricsRegistry())
 }
 
 // provision applies defaults and builds internal state (split out so tests can call it directly).
@@ -106,8 +115,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 // Caddyfile はアダプタで JSON へ変換される糖衣にすぎず、JSON で直接設定されると
 // パーサは一切通らない。どの設定経路でも必ず通るこの場所に置かないと、
 // 経路によってデフォルトの有無が分裂する
-func (h *Handler) provision(logger *zap.Logger) error {
+func (h *Handler) provision(logger *zap.Logger, registry *prometheus.Registry) error {
 	h.logger = logger
+	retries, err := initRetryResponseMetrics(registry)
+	if err != nil {
+		return err
+	}
+	h.retries = retries
 	if len(h.Statuses) == 0 {
 		h.Statuses = []int{http.StatusTooManyRequests}
 	}
@@ -133,6 +147,37 @@ func (h *Handler) provision(logger *zap.Logger) error {
 		h.statusSet[s] = struct{}{}
 	}
 	return nil
+}
+
+func initRetryResponseMetrics(registry *prometheus.Registry) (*prometheus.CounterVec, error) {
+	if registry == nil {
+		return nil, nil
+	}
+
+	retryResponseMetrics.once.Do(func() {
+		retryResponseMetrics.retries = prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "caddy",
+			Subsystem: "retry_response",
+			Name:      "retries_total",
+			Help:      "Counter of retry attempts triggered by retryable response statuses.",
+		}, []string{"status"})
+	})
+
+	err := registry.Register(retryResponseMetrics.retries)
+	if err == nil {
+		return retryResponseMetrics.retries, nil
+	}
+
+	var alreadyRegistered prometheus.AlreadyRegisteredError
+	if errors.As(err, &alreadyRegistered) {
+		retries, ok := alreadyRegistered.ExistingCollector.(*prometheus.CounterVec)
+		if !ok {
+			return nil, fmt.Errorf("retry_response retries metric already registered with unexpected type %T", alreadyRegistered.ExistingCollector)
+		}
+		return retries, nil
+	}
+
+	return nil, fmt.Errorf("registering retry_response retries metric: %w", err)
 }
 
 // Validate implements caddy.Validator.
@@ -217,11 +262,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 				zap.Int("status", aw.status))
 			return caddyhttp.Error(statusClientClosedRequest, err)
 		}
+		h.recordRetry(aw.status)
 		h.logger.Debug("retrying request",
 			zap.String("uri", r.RequestURI),
 			zap.Int("attempt", attempt),
 			zap.Int("status", aw.status))
 	}
+}
+
+func (h *Handler) recordRetry(status int) {
+	if h.retries == nil {
+		return
+	}
+	h.retries.WithLabelValues(strconv.Itoa(status)).Inc()
 }
 
 // bufferedBody is a request body buffered in a replayable form.
