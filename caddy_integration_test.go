@@ -20,6 +20,7 @@ import (
 	"github.com/caddyserver/caddy/v2/caddyconfig"
 	_ "github.com/caddyserver/caddy/v2/modules/caddyhttp/reverseproxy"
 	_ "github.com/caddyserver/caddy/v2/modules/filestorage"
+	_ "github.com/caddyserver/caddy/v2/modules/metrics"
 )
 
 func TestCaddyfileAdapterOrdersRetryResponseBeforeRoute(t *testing.T) {
@@ -131,6 +132,8 @@ http://localhost:%d {
 		max_body 10MiB
 	}
 
+	metrics /metrics
+
 	reverse_proxy %s
 }
 `, t.TempDir(), caddyPort, upstreamAddr))
@@ -169,6 +172,20 @@ http://localhost:%d {
 	}
 	if bytes.Contains(body, []byte("discarded")) {
 		t.Errorf("discarded attempt body leaked: %q", body)
+	}
+
+	metricsResp, err := client.Get(fmt.Sprintf("http://localhost:%d/metrics", caddyPort))
+	if err != nil {
+		t.Fatalf("scrape metrics through Caddy: %v", err)
+	}
+	defer metricsResp.Body.Close()
+	metricsBody, _ := io.ReadAll(metricsResp.Body)
+
+	if metricsResp.StatusCode != http.StatusOK {
+		t.Fatalf("metrics status = %d, want 200; body=%q", metricsResp.StatusCode, metricsBody)
+	}
+	if !bytes.Contains(metricsBody, []byte(`caddy_retry_response_retries_total{status="429"} 1`)) {
+		t.Fatalf("retry metric missing from /metrics:\n%s", metricsBody)
 	}
 }
 

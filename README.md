@@ -139,6 +139,23 @@ example.com {
 }
 ```
 
+## Metrics
+
+When Caddy's Prometheus metrics endpoint is configured, this module adds:
+
+| Metric | Labels | Description |
+|---|---|---|
+| `caddy_retry_response_retries_total` | `status` | Number of actual retries started after a retryable response status was discarded. |
+
+For example:
+
+```text
+caddy_retry_response_retries_total{status="429"} 12
+```
+
+The counter increments once per additional attempt. A retryable status returned
+by the final attempt is not counted, because no retry is started.
+
 ## Operational notes
 
 - Keep `max_body` aligned with the site's `request_body max_size`. The module

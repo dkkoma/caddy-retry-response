@@ -16,6 +16,8 @@ import (
 
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
 )
 
@@ -25,13 +27,60 @@ func newHandler(t *testing.T, mutate func(*Handler)) *Handler {
 	if mutate != nil {
 		mutate(h)
 	}
-	if err := h.provision(zap.NewNop()); err != nil {
+	if err := h.provision(zap.NewNop(), nil); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
 	if err := h.Validate(); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
 	return h
+}
+
+func TestRetryMetricCountsActualRetries(t *testing.T) {
+	registry := prometheus.NewRegistry()
+	h := &Handler{Attempts: 3}
+	if err := h.provision(zap.NewNop(), registry); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := h.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+
+	calls := 0
+	next := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+		return nil
+	})
+
+	before := counterValue(t, h.retries, "429")
+
+	rec := httptest.NewRecorder()
+	if err := h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api", strings.NewReader("data")), next); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+
+	if calls != 3 {
+		t.Fatalf("next called %d times, want 3", calls)
+	}
+	if got := counterValue(t, h.retries, "429") - before; got != 2 {
+		t.Fatalf("retry metric = %v, want 2", got)
+	}
+}
+
+func counterValue(t *testing.T, counter *prometheus.CounterVec, labelValues ...string) float64 {
+	t.Helper()
+
+	metric, err := counter.GetMetricWithLabelValues(labelValues...)
+	if err != nil {
+		t.Fatalf("get metric: %v", err)
+	}
+
+	var pb dto.Metric
+	if err := metric.Write(&pb); err != nil {
+		t.Fatalf("write metric: %v", err)
+	}
+	return pb.GetCounter().GetValue()
 }
 
 type cancelingReadCloser struct {
@@ -739,7 +788,7 @@ func TestValidate(t *testing.T) {
 			if tc.mutate != nil {
 				tc.mutate(h)
 			}
-			if err := h.provision(zap.NewNop()); err != nil {
+			if err := h.provision(zap.NewNop(), nil); err != nil {
 				t.Fatal(err)
 			}
 			if err := h.Validate(); (err == nil) != tc.valid {
